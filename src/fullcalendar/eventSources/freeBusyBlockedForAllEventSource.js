@@ -20,30 +20,37 @@
  *
  */
 import getTimezoneManager from '../../services/timezoneDataProviderService.js'
-import { createFreeBusyRequest } from 'calendar-js'
+import {createFreeBusyRequest, getParserManager} from 'calendar-js'
 import DateTimeValue from 'calendar-js/src/values/dateTimeValue.js'
-import { findSchedulingOutbox } from '../../services/caldavService.js'
-import freeBusyEventSourceFunction from './freeBusyEventSourceFunction.js'
+import {findSchedulingOutbox} from '../../services/caldavService.js'
+import freeBusyResourceEventSourceFunction from './freeBusyResourceEventSourceFunction.js'
 import logger from '../../utils/logger.js'
+import {getColorForFBType} from "../../utils/freebusy";
 // import AttendeeProperty from 'calendar-js/src/properties/attendeeProperty.js'
 
 /**
  * Returns an event source for free-busy
  *
- * @param {String} id Identification for this source
  * @param {AttendeeProperty} organizer The organizer of the event
  * @param {AttendeeProperty[]} attendees Array of the event's attendees
+ * @param {String[]} resources List of resources
  * @returns {{startEditable: boolean, resourceEditable: boolean, editable: boolean, id: string, durationEditable: boolean, events: events}}
  */
-export default function(id, organizer, attendees) {
+export default function (organizer, attendees, resources) {
+	const resourceIds = resources.map((resource) => resource.id)
+
 	return {
-		id: 'free-busy-event-source-' + id,
+		id: 'free-busy-free-for-all',
 		editable: false,
 		startEditable: false,
 		durationEditable: false,
 		resourceEditable: false,
-		events: async({ start, end, timeZone }, successCallback, failureCallback) => {
-			console.debug(start, end, timeZone)
+		events: async ({
+						   start,
+						   end,
+						   timeZone
+					   }, successCallback, failureCallback) => {
+			console.debug('freeBusyBlockedForAllEventSource', start, end, timeZone)
 
 			let timezoneObject = getTimezoneManager().getTimezoneForId(timeZone)
 			if (!timezoneObject) {
@@ -73,12 +80,44 @@ export default function(id, organizer, attendees) {
 				failureCallback(error)
 				return
 			}
+
 			const events = []
 			for (const [uri, data] of Object.entries(freeBusyData)) {
-				events.push(...freeBusyEventSourceFunction(uri, data.calendarData, data.success, startDateTime, endDateTime, timezoneObject))
+				if (!data.success) {
+					continue;
+				}
+
+				const parserManager = getParserManager()
+				const parser = parserManager.getParserForFileType('text/calendar')
+				parser.parse(data.calendarData)
+
+				// TODO: fix me upstream, parser only exports VEVENT, VJOURNAL and VTODO at the moment
+				const calendarComponent = parser._calendarComponent
+				const freeBusyComponent = calendarComponent.getFirstComponent('VFREEBUSY')
+				if (!freeBusyComponent) {
+					continue;
+				}
+
+				for (const freeBusyProperty of freeBusyComponent.getPropertyIterator('FREEBUSY')) {
+					const eventStart = freeBusyProperty.getFirstValue().start.getInTimezone(timezoneObject).jsDate.toISOString()
+					const eventEnd = freeBusyProperty.getFirstValue().end.getInTimezone(timezoneObject).jsDate.toISOString()
+
+					// TODO: prevent overlaps
+					events.push({
+						groupId: Math.random().toString(36).substring(7),
+						start: eventStart,
+						end: eventEnd,
+						resourceIds: resourceIds,
+						display: 'background',
+						allDay: false,
+						backgroundColor: 'lightgrey',
+						borderColor: 'lightgrey',
+					})
+				}
 			}
 
-			console.debug(events)
+			console.debug('freeBusyBlockedForAllEventSource', events)
+
 			successCallback(events)
 		},
 	}
